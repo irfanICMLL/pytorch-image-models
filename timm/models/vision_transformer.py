@@ -141,7 +141,6 @@ class Block(nn.Module):
         )
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp(
             in_features=dim,
@@ -151,11 +150,15 @@ class Block(nn.Module):
         )
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-
-    def forward(self, x):
-        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
+        #self.cluster_center = nn.Parameters(x.shape[0])
+    def forward(self, x, q):
+        x = self.norm1(x)
+        q_new = q
+        print("shape___________x:", x.shape)
+        print("shape__________q:", q.shape, q_new.shape)
+        x = x + self.drop_path1(self.ls1(self.attn(x)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
-        return x
+        return x, q, q_new
 
 
 class ResPostBlock(nn.Module):
@@ -403,6 +406,7 @@ class VisionTransformer(nn.Module):
             drop_rate=0.,
             attn_drop_rate=0.,
             drop_path_rate=0.,
+            ratio = 4.,
             weight_init='',
             embed_layer=PatchEmbed,
             norm_layer=None,
@@ -438,14 +442,14 @@ class VisionTransformer(nn.Module):
         use_fc_norm = global_pool == 'avg' if fc_norm is None else fc_norm
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         act_layer = act_layer or nn.GELU
-
+        self.ratio = ratio
         self.num_classes = num_classes
         self.global_pool = global_pool
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.num_prefix_tokens = 1 if class_token else 0
         self.no_embed_class = no_embed_class
         self.grad_checkpointing = False
-
+        self.depth = depth
         self.patch_embed = embed_layer(
             img_size=img_size,
             patch_size=patch_size,
@@ -458,12 +462,16 @@ class VisionTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if class_token else None
         embed_len = num_patches if no_embed_class else num_patches + self.num_prefix_tokens
         self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * .02)
+        self.cluster_q = nn.Parameter(torch.randn(depth, int((embed_len-1) / self.ratio), embed_dim))
+        print("q.shape!!!!", self.cluster_q.shape)
         self.pos_drop = nn.Dropout(p=drop_rate)
         self.norm_pre = norm_layer(embed_dim) if pre_norm else nn.Identity()
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        self.blocks = nn.Sequential(*[
-            block_fn(
+        #self.blocks = []
+        for i in range(depth):
+            setattr(self, f"block_{i}",
+                block_fn(
                 dim=embed_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
@@ -475,8 +483,9 @@ class VisionTransformer(nn.Module):
                 drop_path=dpr[i],
                 norm_layer=norm_layer,
                 act_layer=act_layer
+            )       
             )
-            for i in range(depth)])
+
         self.norm = norm_layer(embed_dim) if not use_fc_norm else nn.Identity()
 
         # Classifier Head
@@ -544,15 +553,22 @@ class VisionTransformer(nn.Module):
         return self.pos_drop(x)
 
     def forward_features(self, x):
+        res_q = []
+        res_q_new = []
         x = self.patch_embed(x)
         x = self._pos_embed(x)
         x = self.norm_pre(x)
         if self.grad_checkpointing and not torch.jit.is_scripting():
+            print("I AM HERE!!!")
             x = checkpoint_seq(self.blocks, x)
         else:
-            x = self.blocks(x)
+            for i in range(self.depth):
+                x, q, q_new = getattr(self,f"block_{i}")(x, self.cluster_q[i, :, :])
+                res_q.append(q)
+                res_q_new.append(q_new)
+           # x, q = self.blocks(x, self.cluster_q)
         x = self.norm(x)
-        return x
+        return x, res_q, res_q_new
 
     def forward_head(self, x, pre_logits: bool = False):
         if self.global_pool:
@@ -561,7 +577,7 @@ class VisionTransformer(nn.Module):
         return x if pre_logits else self.head(x)
 
     def forward(self, x):
-        x = self.forward_features(x)
+        x, q, q_new = self.forward_features(x)
         x = self.forward_head(x)
         return x
 
