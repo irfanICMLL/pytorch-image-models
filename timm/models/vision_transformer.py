@@ -153,12 +153,22 @@ class Block(nn.Module):
         #self.cluster_center = nn.Parameters(x.shape[0])
     def forward(self, x, q):
         x = self.norm1(x)
+        q0 = q.clone()
+        for i in range(3):
+            attn = q@x.transpose(-1,-2)
+            attn = attn.softmax(dim=-1)
+            q = attn@x
+        attn = q@x.transpose(-1,-2)
+        attn.detach()
+        x = attn@x 
         q_new = q
         print("shape___________x:", x.shape)
         print("shape__________q:", q.shape, q_new.shape)
         x = x + self.drop_path1(self.ls1(self.attn(x)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
-        return x, q, q_new
+        x = attn.transpose(-1,-2) @ x  # NOTE shape recover
+        # x += x0 
+        return x, q0, q_new
 
 
 class ResPostBlock(nn.Module):
