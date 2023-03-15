@@ -160,13 +160,13 @@ group.add_argument('--opt-betas', default=None, type=float, nargs='+', metavar='
                    help='Optimizer Betas (default: None, use opt default)')
 group.add_argument('--momentum', type=float, default=0.9, metavar='M',
                    help='Optimizer momentum (default: 0.9)')
-group.add_argument('--weight-decay', type=float, default=2e-5,
+group.add_argument('--weight-decay', type=float, default=0.05,
                    help='weight decay (default: 2e-5)')
 group.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
                    help='Clip gradient norm (default: None, no clipping)')
 group.add_argument('--clip-mode', type=str, default='norm',
                    help='Gradient clipping mode. One of ("norm", "value", "agc")')
-group.add_argument('--layer-decay', type=float, default=None,
+group.add_argument('--layer-decay', type=float, default=0.75,
                    help='layer-wise learning rate decay (default: None)')
 group.add_argument('--opt-kwargs', nargs='*', default={}, action=utils.ParseKwargs)
 
@@ -178,7 +178,7 @@ group.add_argument('--sched-on-updates', action='store_true', default=False,
                    help='Apply LR scheduler step on update instead of epoch end.')
 group.add_argument('--lr', type=float, default=None, metavar='LR',
                    help='learning rate, overrides lr-base if set (default: None)')
-group.add_argument('--lr-base', type=float, default=0.1, metavar='LR',
+group.add_argument('--lr-base', type=float, default=0.001, metavar='LR',
                    help='base learning rate: lr = lr_base * global_batch_size / base_size')
 group.add_argument('--lr-base-size', type=int, default=256, metavar='DIV',
                    help='base learning rate batch size (divisor, default: 256).')
@@ -200,7 +200,7 @@ group.add_argument('--lr-k-decay', type=float, default=1.0,
                    help='learning rate k-decay for cosine/poly (default: 1.0)')
 group.add_argument('--warmup-lr', type=float, default=1e-5, metavar='LR',
                    help='warmup learning rate (default: 1e-5)')
-group.add_argument('--min-lr', type=float, default=0, metavar='LR',
+group.add_argument('--min-lr', type=float, default=1e-6, metavar='LR',
                    help='lower lr bound for cyclic schedulers that hit 0 (default: 0)')
 group.add_argument('--epochs', type=int, default=300, metavar='N',
                    help='number of epochs to train (default: 300)')
@@ -237,7 +237,7 @@ group.add_argument('--vflip', type=float, default=0.,
                    help='Vertical flip training aug probability')
 group.add_argument('--color-jitter', type=float, default=0.4, metavar='PCT',
                    help='Color jitter factor (default: 0.4)')
-group.add_argument('--aa', type=str, default=None, metavar='NAME',
+group.add_argument('--aa', type=str, default='rand-m9-mstd0.5-inc1', metavar='NAME',
                    help='Use AutoAugment policy. "v0" or "original". (default: None)'),
 group.add_argument('--aug-repeats', type=float, default=0,
                    help='Number of augmentation repetitions (distributed training only) (default: 0)')
@@ -249,7 +249,7 @@ group.add_argument('--bce-loss', action='store_true', default=False,
                    help='Enable BCE loss w/ Mixup/CutMix use.')
 group.add_argument('--bce-target-thresh', type=float, default=None,
                    help='Threshold for binarizing softened BCE targets (default: None, disabled)')
-group.add_argument('--reprob', type=float, default=0., metavar='PCT',
+group.add_argument('--reprob', type=float, default=0.25, metavar='PCT',
                    help='Random erase prob (default: 0.)')
 group.add_argument('--remode', type=str, default='pixel',
                    help='Random erase mode (default: "pixel")')
@@ -277,7 +277,7 @@ group.add_argument('--train-interpolation', type=str, default='random',
                    help='Training interpolation (random, bilinear, bicubic default: "random")')
 group.add_argument('--drop', type=float, default=0.0, metavar='PCT',
                    help='Dropout rate (default: 0.)')
-group.add_argument('--drop-connect', type=float, default=None, metavar='PCT',
+group.add_argument('--drop-connect', type=float, default=0.1, metavar='PCT',
                    help='Drop connect rate, DEPRECATED, use drop-path (default: None)')
 group.add_argument('--drop-path', type=float, default=None, metavar='PCT',
                    help='Drop path rate (default: None)')

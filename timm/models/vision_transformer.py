@@ -153,22 +153,27 @@ class Block(nn.Module):
         #self.cluster_center = nn.Parameters(x.shape[0])
     def forward(self, x, q):
         x = self.norm1(x)
+        x0 = x.clone()
+       
+        bs = x.size()[0]
+        q = q.repeat(bs, 1, 1)
         q0 = q.clone()
-        for i in range(3):
-            attn = q@x.transpose(-1,-2)
-            attn = attn.softmax(dim=-1)
-            q = attn@x
-        attn = q@x.transpose(-1,-2)
-        attn.detach()
-        x = attn@x 
-        q_new = q
-        print("shape___________x:", x.shape)
-        print("shape__________q:", q.shape, q_new.shape)
-        x = x + self.drop_path1(self.ls1(self.attn(x)))
+        for i in range(2):
+            attn = q0@x.transpose(-1, -2)
+            attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
+            q0 = attn@x/torch.sum(attn, dim=-1, keepdim=True)
+        attn = q0@x.transpose(-1,-2)
+        attn = attn.softmax(dim = -2)
+        attn_constant = attn.detach()
+       # attn.requires_grad = False
+        q_new = attn_constant@x
+        
+        x = q_new + self.drop_path1(self.ls1(self.attn(q_new)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
-        x = attn.transpose(-1,-2) @ x  # NOTE shape recover
-        # x += x0 
-        return x, q0, q_new
+        x = attn_constant .transpose(-1,-2) @ x  # NOTE shape recover
+        
+        x += x0  #not sure if we could add this
+        return x, q, q_new
 
 
 class ResPostBlock(nn.Module):
@@ -473,14 +478,13 @@ class VisionTransformer(nn.Module):
         embed_len = num_patches if no_embed_class else num_patches + self.num_prefix_tokens
         self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * .02)
         self.cluster_q = nn.Parameter(torch.randn(depth, int((embed_len-1) / self.ratio), embed_dim))
-        print("q.shape!!!!", self.cluster_q.shape)
         self.pos_drop = nn.Dropout(p=drop_rate)
         self.norm_pre = norm_layer(embed_dim) if pre_norm else nn.Identity()
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         #self.blocks = []
         for i in range(depth):
-            setattr(self, f"block_{i}",
+            setattr(self, f"blocks.{i}",
                 block_fn(
                 dim=embed_dim,
                 num_heads=num_heads,
@@ -573,7 +577,7 @@ class VisionTransformer(nn.Module):
             x = checkpoint_seq(self.blocks, x)
         else:
             for i in range(self.depth):
-                x, q, q_new = getattr(self,f"block_{i}")(x, self.cluster_q[i, :, :])
+                x, q, q_new = getattr(self,f"blocks.{i}")(x, self.cluster_q[i, :, :])
                 res_q.append(q)
                 res_q_new.append(q_new)
            # x, q = self.blocks(x, self.cluster_q)
@@ -589,7 +593,7 @@ class VisionTransformer(nn.Module):
     def forward(self, x):
         x, q, q_new = self.forward_features(x)
         x = self.forward_head(x)
-        return x
+        return x, q, q_new
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = ''):

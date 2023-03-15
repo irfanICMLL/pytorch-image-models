@@ -18,11 +18,16 @@ class LabelSmoothingCrossEntropy(nn.Module):
         self.confidence = 1. - smoothing
 
     def forward(self, x: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        logprobs = F.log_softmax(x, dim=-1)
+        x0, q, q_new = x
+        logprobs = F.log_softmax(x0, dim=-1)
         nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
         nll_loss = nll_loss.squeeze(1)
+        loss_cluster = nll_loss*0
+        for i in range(len(q)):
+            loss_cluster = loss_cluster -F.cosine_similarity(q[i], q_new[i]).abs().mean()
+            
         smooth_loss = -logprobs.mean(dim=-1)
-        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
+        loss = self.confidence * nll_loss + self.smoothing * smooth_loss + 0.1 * loss_cluster 
         return loss.mean()
 
 
