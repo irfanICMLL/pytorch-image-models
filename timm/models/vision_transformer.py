@@ -158,21 +158,23 @@ class Block(nn.Module):
         bs = x.size()[0]
         q = q.repeat(bs, 1, 1)
         q0 = q.clone()
-        for i in range(2):
-            attn = q0@x.transpose(-1, -2)
+        with torch.no_grad():
+
+            for i in range(2):
+                attn = q0@x.transpose(-1, -2)
+                attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
+                q0 = attn@x/torch.sum(attn, dim=-1, keepdim=True)
+            attn = q0@x.transpose(-1,-2)
             attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
-            q0 = attn@x/torch.sum(attn, dim=-1, keepdim=True)
-        attn = q0@x.transpose(-1,-2)
-        attn = attn.softmax(dim = -2)
-        attn_constant = attn.detach()
-       # attn.requires_grad = False
-        q_new = attn_constant@x
+            attn_constant = attn.detach()
+        # attn.requires_grad = False
+        q_new = attn_constant@x/torch.sum(attn, dim=-1, keepdim=True)
         
         x = q_new + self.drop_path1(self.ls1(self.attn(q_new)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         x = attn_constant .transpose(-1,-2) @ x  # NOTE shape recover
-        
-        x += x0  #not sure if we could add this
+        x = x + x0
+   #not sure if we could add this
         return x, q, q_new
 
 
