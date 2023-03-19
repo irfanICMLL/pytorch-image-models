@@ -237,7 +237,7 @@ group.add_argument('--vflip', type=float, default=0.,
                    help='Vertical flip training aug probability')
 group.add_argument('--color-jitter', type=float, default=0.4, metavar='PCT',
                    help='Color jitter factor (default: 0.4)')
-group.add_argument('--aa', type=str, default='rand-m9-mstd0.5-inc1', metavar='NAME',
+group.add_argument('--aa', type=str, default='v0', metavar='NAME',
                    help='Use AutoAugment policy. "v0" or "original". (default: None)'),
 group.add_argument('--aug-repeats', type=float, default=0,
                    help='Number of augmentation repetitions (distributed training only) (default: 0)')
