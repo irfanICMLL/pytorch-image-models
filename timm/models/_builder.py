@@ -219,7 +219,6 @@ def load_pretrained(
                 state_dict[classifier_name + '.weight'] = classifier_weight[label_offset:]
                 classifier_bias = state_dict[classifier_name + '.bias']
                 state_dict[classifier_name + '.bias'] = classifier_bias[label_offset:]
-
     model.load_state_dict(state_dict, strict=False)
 
 

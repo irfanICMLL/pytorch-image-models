@@ -11,6 +11,7 @@ from .plateau_lr import PlateauLRScheduler
 from .poly_lr import PolyLRScheduler
 from .step_lr import StepLRScheduler
 from .tanh_lr import TanhLRScheduler
+from .const_lr import ConstLr
 
 
 def scheduler_kwargs(cfg):
@@ -157,6 +158,15 @@ def create_scheduler_v2(
             **warmup_args,
             **noise_args,
         )
+    elif sched == 'const':
+        lr_scheduler = Const(
+            optimizer,
+            decay_t=decay_t,
+            decay_rate=decay_rate,
+            t_in_epochs=step_on_epochs,
+            **warmup_args,
+            **noise_args,
+        )
     elif sched == 'multistep':
         lr_scheduler = MultiStepLRScheduler(
             optimizer,
@@ -179,6 +189,7 @@ def create_scheduler_v2(
             mode=plateau_mode,
             **noise_args,
         )
+    
     elif sched == 'poly':
         lr_scheduler = PolyLRScheduler(
             optimizer,

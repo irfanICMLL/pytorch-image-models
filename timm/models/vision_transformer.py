@@ -154,12 +154,10 @@ class Block(nn.Module):
     def forward(self, x, q):
         x = self.norm1(x)
         x0 = x.clone()
-       
         bs = x.size()[0]
         q = q.repeat(bs, 1, 1)
         q0 = q.clone()
         with torch.no_grad():
-
             for i in range(2):
                 attn = q0@x.transpose(-1, -2)
                 attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
@@ -169,11 +167,12 @@ class Block(nn.Module):
             attn_constant = attn.detach()
         # attn.requires_grad = False
         q_new = attn_constant@x/torch.sum(attn, dim=-1, keepdim=True)
-        
+
         x = q_new + self.drop_path1(self.ls1(self.attn(q_new)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         x = attn_constant .transpose(-1,-2) @ x  # NOTE shape recover
         x = x + x0
+        
    #not sure if we could add this
         return x, q, q_new
 
@@ -485,9 +484,25 @@ class VisionTransformer(nn.Module):
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         #self.blocks = []
-        for i in range(depth):
-            setattr(self, f"blocks.{i}",
-                block_fn(
+        # for i in range(depth):
+        #     setattr(self, f"blocks.{i}",
+        #         block_fn(
+        #         dim=embed_dim,
+        #         num_heads=num_heads,
+        #         mlp_ratio=mlp_ratio,
+        #         qkv_bias=qkv_bias,
+        #         qk_norm=qk_norm,
+        #         init_values=init_values,
+        #         drop=drop_rate,
+        #         attn_drop=attn_drop_rate,
+        #         drop_path=dpr[i],
+        #         norm_layer=norm_layer,
+        #         act_layer=act_layer
+        #     )       
+        #     )
+
+        self.blocks = nn.Sequential(*[
+            block_fn(
                 dim=embed_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
@@ -499,8 +514,8 @@ class VisionTransformer(nn.Module):
                 drop_path=dpr[i],
                 norm_layer=norm_layer,
                 act_layer=act_layer
-            )       
             )
+            for i in range(depth)])
 
         self.norm = norm_layer(embed_dim) if not use_fc_norm else nn.Identity()
 
@@ -579,7 +594,7 @@ class VisionTransformer(nn.Module):
             x = checkpoint_seq(self.blocks, x)
         else:
             for i in range(self.depth):
-                x, q, q_new = getattr(self,f"blocks.{i}")(x, self.cluster_q[i, :, :])
+                x, q, q_new = getattr(self.blocks, f"{i}")(x, self.cluster_q[i, :, :])
                 res_q.append(q)
                 res_q_new.append(q_new)
            # x, q = self.blocks(x, self.cluster_q)

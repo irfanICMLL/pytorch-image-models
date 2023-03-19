@@ -27,7 +27,7 @@ class LabelSmoothingCrossEntropy(nn.Module):
             loss_cluster = loss_cluster - F.cosine_similarity(q[i], q_new[i]).abs().mean()
             
         smooth_loss = -logprobs.mean(dim=-1)
-        loss = self.confidence * nll_loss + self.smoothing * smooth_loss + 0.1 * loss_cluster 
+        loss = self.confidence * nll_loss + self.smoothing * smooth_loss + 0.01 * loss_cluster 
         return loss.mean()
 
 
