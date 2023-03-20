@@ -183,7 +183,7 @@ class Block(nn.Module):
         # x = attn.transpose(-1,-2) @ x  # NOTE shape recover
         ret = torch.einsum("bmn, bnc -> bmc", attn, x)
         
-        x = x + x0
+        x =ret + x0
         #not sure if we could add this
         return x, q, q
 
