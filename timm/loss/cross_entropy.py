@@ -53,20 +53,20 @@ class LabelSmoothingCrossEntropy(nn.Module):
         logprobs = F.log_softmax(x0, dim=-1)
         nll_loss = -logprobs.gather(dim=-1, index=target.unsqueeze(1))
         nll_loss = nll_loss.squeeze(1)
-        loss_cluster = nll_loss.mean()*0
-        labels = torch.cat([torch.arange(49) for i in range(1)], dim=0)
-        labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-        labels = labels.to(q[0].get_device())
-        labels = labels.repeat(q[0].shape[0], 1, 1)
-        for i in range(len(q)):
-            # loss = self.info_nce_loss(q[i], q_new[i])
-            scores = torch.matmul(q[i], q_new[i].transpose(-1, -2)) / torch.sqrt(torch.tensor(q_new[i].shape[-1], dtype=torch.float32))
-            attention_weights = torch.softmax(scores, dim=-1)/0.1
-            loss_cluster = loss_cluster + F.cross_entropy(attention_weights,labels)
-            # loss_cluster = loss_cluster - F.cosine_similarity(q[i], q_new[i]).abs().mean()      
+        # loss_cluster = nll_loss.gitmean()*0
+        # labels = torch.cat([torch.arange(49) for i in range(1)], dim=0)
+        # labels = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
+        # labels = labels.to(q[0].get_device())
+        # labels = labels.repeat(q[0].shape[0], 1, 1)
+        # for i in range(len(q)):
+        #     # loss = self.info_nce_loss(q[i], q_new[i])
+        #     scores = torch.matmul(q[i], q_new[i].transpose(-1, -2)) / torch.sqrt(torch.tensor(q_new[i].shape[-1], dtype=torch.float32))
+        #     attention_weights = torch.softmax(scores, dim=-1)/0.1
+        #     loss_cluster = loss_cluster + F.cross_entropy(attention_weights,labels)
+        #     # loss_cluster = loss_cluster - F.cosine_similarity(q[i], q_new[i]).abs().mean()      
         smooth_loss = -logprobs.mean(dim=-1)
         loss = self.confidence * nll_loss + self.smoothing * smooth_loss 
-        return loss.mean()+ 0.01 * loss_cluster 
+        return loss.mean()
 
     
     

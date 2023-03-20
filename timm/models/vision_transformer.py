@@ -156,25 +156,36 @@ class Block(nn.Module):
         x0 = x.clone()
         bs = x.size()[0]
         q = q.repeat(bs, 1, 1)
-        q0 = q.clone()
-        with torch.no_grad():
-            for i in range(2):
-                attn = q0@x.transpose(-1, -2)
-                attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
-                q0 = attn@x/torch.sum(attn, dim=-1, keepdim=True)
-            attn = q0@x.transpose(-1,-2)
-            attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
-            attn_constant = attn.detach()
-        # attn.requires_grad = False
-        q_new = attn_constant@x/torch.sum(attn, dim=-1, keepdim=True)
-
-        x = q_new + self.drop_path1(self.ls1(self.attn(q_new)))
-        x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
-        x = attn_constant .transpose(-1,-2) @ x  # NOTE shape recover
-        x = x + x0
+        # q0 = q.clone()
+        # with torch.no_grad():
+            # for i in range(2):
+                # attn = q0@x.transpose(-1, -2)
+                # attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
+                # q0 = attn@x/torch.sum(attn, dim=-1, keepdim=True)
+        # attn = q@x.transpose(-1,-2)
         
-   #not sure if we could add this
-        return x, q, q_new
+        sim = torch.einsum('b i d, b j d -> b i j', q, x)
+        attn = sim.softmax(dim=-2, dtype=torch.float32) + 1e-6
+        attn = attn / torch.sum(attn, dim=-1, keepdim=True)
+        
+        # attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
+        # attn_constant = attn.detach()
+        # attn.requires_grad = False
+        out = torch.einsum('b i j, b j d -> b i d', attn, x)
+        # q_new = attn@x
+
+        x = out + self.drop_path1(self.ls1(self.attn(out)))
+        x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
+        
+        sim = torch.einsum('b i d, b j d -> b i j', x0, x)
+        attn = sim.softmax(dim=-2, dtype=torch.float32) + 1e-6
+        attn = attn / torch.sum(attn, dim=-1, keepdim=True)
+        # x = attn.transpose(-1,-2) @ x  # NOTE shape recover
+        ret = torch.einsum("bmn, bnc -> bmc", attn, x)
+        
+        x = x + x0
+        #not sure if we could add this
+        return x, q, q
 
 
 class ResPostBlock(nn.Module):
