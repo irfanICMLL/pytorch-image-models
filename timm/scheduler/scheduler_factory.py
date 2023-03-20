@@ -159,7 +159,7 @@ def create_scheduler_v2(
             **noise_args,
         )
     elif sched == 'const':
-        lr_scheduler = Const(
+        lr_scheduler = ConstLr(
             optimizer,
             decay_t=decay_t,
             decay_rate=decay_rate,
