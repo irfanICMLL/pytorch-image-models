@@ -63,11 +63,11 @@ class LabelSmoothingCrossEntropy(nn.Module):
         for i in range(len(q)):
             # loss = self.info_nce_loss(q[i], q_new[i])
             scores = torch.matmul(q[i], q_new[i].transpose(-1, -2)) / torch.sqrt(torch.tensor(q_new[i].shape[-1], dtype=torch.float32))
-            loss_cluster = loss_cluster + F.cross_entropy(scores,labels)
+            loss_cluster = loss_cluster + F.cross_entropy(scores.reshape(-1,49),labels.reshape(-1,49))/bs
             # loss_cluster = loss_cluster - F.cosine_similarity(q[i], q_new[i]).abs().mean()      
         smooth_loss = -logprobs.mean(dim=-1)
         loss = self.confidence * nll_loss + self.smoothing * smooth_loss 
-        return loss.mean()+ loss_cluster /num_q/bs
+        return loss.mean()+ loss_cluster /len(q)
 
     
     
