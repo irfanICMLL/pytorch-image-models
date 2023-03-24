@@ -34,6 +34,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.jit import Final
+import numpy as np
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD, \
     OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
@@ -111,6 +112,197 @@ class LayerScale(nn.Module):
     def forward(self, x):
         return x.mul_(self.gamma) if self.inplace else x * self.gamma
 
+class TokenClusteringBlock(nn.Module):
+    def __init__(self, num_spixels=None, n_iters=5, temperture=1., window_size=7):
+        super().__init__()
+        if isinstance(num_spixels, tuple):
+            assert len(num_spixels) == 2
+        elif num_spixels is not None:
+            x = int(math.sqrt(num_spixels))
+            assert x * x == num_spixels
+            num_spixels = (x, x)
+        self.num_spixels = num_spixels
+        self.n_iters = n_iters
+        self.temperture = temperture
+        assert window_size % 2 == 1
+        self.r = window_size // 2
+
+    def calc_init_centroid(self, images, num_spixels_width, num_spixels_height):
+        """
+        calculate initial superpixels
+
+        Args:
+            images: torch.Tensor
+                A Tensor of shape (B, C, H, W)
+            spixels_width: int
+                initial superpixel width
+            spixels_height: int
+                initial superpixel height
+
+        Return:
+            centroids: torch.Tensor
+                A Tensor of shape (B, C, H * W)
+            init_label_map: torch.Tensor
+                A Tensor of shape (B, H * W)
+            num_spixels_width: int
+                A number of superpixels in each column
+            num_spixels_height: int
+                A number of superpixels int each raw
+        """
+        batchsize, channels, height, width = images.shape
+        device = images.device
+
+        centroids = torch.nn.functional.adaptive_avg_pool2d(
+            images, (num_spixels_height, num_spixels_width)
+        )
+
+        with torch.no_grad():
+            num_spixels = num_spixels_width * num_spixels_height
+            labels = (
+                torch.arange(num_spixels, device=device)
+                .reshape(1, 1, *centroids.shape[-2:])
+                .type_as(centroids)
+            )
+            init_label_map = torch.nn.functional.interpolate(
+                labels, size=(height, width), mode="nearest"
+            ).type_as(centroids)
+            init_label_map = init_label_map.repeat(batchsize, 1, 1, 1)
+
+        init_label_map = init_label_map.reshape(batchsize, -1)
+        centroids = centroids.reshape(batchsize, channels, -1)
+
+        return centroids, init_label_map
+
+    def forward(self, pixel_features, num_spixels=None):
+        # import pdb; pdb.set_trace()
+        if num_spixels is None:
+            num_spixels = self.num_spixels
+            assert num_spixels is not None
+        else:
+            if isinstance(num_spixels, tuple):
+                assert len(num_spixels) == 2
+            else:
+                x = int(math.sqrt(num_spixels))
+                assert x * x == num_spixels
+                num_spixels = (x, x)
+        num_spixels_height, num_spixels_width = num_spixels
+        num_spixels = num_spixels_width * num_spixels_height
+        spixel_features, init_label_map = self.calc_init_centroid(
+            pixel_features, num_spixels_width, num_spixels_height
+        )
+
+        device = init_label_map.device
+        spixels_number = torch.arange(num_spixels, device=device)[None, :, None]
+        relative_labels_widths = init_label_map[:, None] % num_spixels_width - spixels_number % num_spixels_width
+        relative_labels_heights = init_label_map[:, None] // num_spixels_width - spixels_number // num_spixels_width
+        mask = torch.logical_and(torch.abs(relative_labels_widths) <= self.r, torch.abs(relative_labels_heights) <= self.r)
+        mask_dist = (~mask) * 1e16
+
+        pixel_features = pixel_features.reshape(*pixel_features.shape[:2], -1)  # (B, C, L)
+        permuted_pixel_features = pixel_features.permute(0, 2, 1)       # (B, L, C)
+
+        for _ in range(self.n_iters):
+            dist_matrix = self.pairwise_dist(pixel_features, spixel_features)    # (B, L', L)
+            dist_matrix += mask_dist
+            affinity_matrix = (-dist_matrix * self.temperture).softmax(1)
+            spixel_features = torch.bmm(affinity_matrix.detach(), permuted_pixel_features)
+            spixel_features = spixel_features / affinity_matrix.detach().sum(2, keepdim=True).clamp_(min=1e-16)
+            spixel_features = spixel_features.permute(0, 2, 1)
+        
+        dist_matrix = self.pairwise_dist(pixel_features, spixel_features)
+        hard_labels = torch.argmin(dist_matrix, dim=1)
+
+        return spixel_features.permute(0, 2, 1), hard_labels
+
+    def pairwise_dist(self, f1, f2):
+        return ((f1 * f1).sum(dim=1).unsqueeze(1)
+                + (f2 * f2).sum(dim=1).unsqueeze(2)
+                - 2 * torch.einsum("bcm, bcn -> bmn", f2, f1))
+
+    def extra_repr(self):
+        return f"num_spixels={self.num_spixels}, n_iters={self.n_iters}"
+
+class State:
+    def __init__(self, unpooling):
+        self.unpooling = unpooling
+        self.__updated = False
+
+    @property
+    def updated(self):
+        return self.__updated
+
+    def get(self, name, default=None):
+        return getattr(self, name, default)
+
+    def update_state(self, **states: dict):
+        self.__updated = True
+        for k, v in states.items():
+            setattr(self, k, v)
+
+    def call(self, input: torch.Tensor):
+        return self.unpooling(input, self)
+
+
+class UnpoolingBase(nn.Module):
+    def forward(self, x, state: State):
+        if not state.updated:
+            return x, False
+        return self._forward(x, state)
+
+    def derive_unpooler(self):
+        return State(self)
+
+
+
+# topk similarity attention
+class TSAUnpooling(UnpoolingBase):
+    def __init__(self, k=3, refine=False, residual=False, temperture=0.05):
+        super().__init__()
+
+        self.refine = refine
+        self.residual = residual
+        self.k = k
+        self.temperture = temperture
+
+    def _forward(self, x, state: State):
+        feat = state.feat_before_pooling
+        sfeat = state.feat_after_pooling
+        ds = (
+            (feat * feat).sum(dim=2).unsqueeze(2)
+            + (sfeat * sfeat).sum(dim=2).unsqueeze(1)
+            - 2 * torch.einsum("bnc, bmc -> bnm", feat, sfeat)
+        )  # distance between features and super-features
+        ds[ds < 0] = 0
+        weight = torch.exp(-self.temperture * ds)
+        if self.k >= 0:
+            topk, indices = torch.topk(weight, k=self.k, dim=2)
+            mink = torch.min(topk, dim=-1).values
+            mink = mink.unsqueeze(-1).repeat(1, 1, weight.shape[-1])
+            mask = torch.ge(weight, mink)
+            zero = Variable(torch.zeros_like(weight)).cuda()
+            attention = torch.where(mask, weight, zero)
+        attention = F.normalize(attention, dim=2)
+        ret = torch.einsum("bnm, bmc -> bnc", attention, x)
+
+        return ret, False
+from time import time
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn import datasets
+from sklearn.manifold import TSNE
+
+# def main():
+    # tsne = TSNE(n_components=2, init='pca', random_state=0)
+    # t0 = time()
+    # q_vis = np.array(q_new.cpu().data).reshape(-1,d)
+    # result = tsne.fit_transform(data)
+    # print('result.shape',result.shape)
+    # fig = plt.figure()
+    # plt.scatter(result[:,0],result[:,1])
+    # plt.savefig('./3.jpg')
+    # plt.show(fig)
+
 
 class Block(nn.Module):
 
@@ -157,24 +349,41 @@ class Block(nn.Module):
         bs = x.size()[0]
         q = q.repeat(bs, 1, 1)
         q0 = q.clone()
+        d = x.size()[-1]
         with torch.no_grad():
             for i in range(2):
-                attn = q0@x.transpose(-1, -2)
-                attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
-                q0 = attn@x/torch.sum(attn, dim=-1, keepdim=True)
-            attn = q0@x.transpose(-1,-2)
-            attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
+                sim = torch.einsum('b i d, b j d -> b i j', q, x)/np.sqrt(d)
+                attn = sim.softmax(dim=-2, dtype=torch.float32) + 1e-6
+                # attn = attn / torch.sum(attn.detach(), dim=-1, keepdim=True)
+                q = torch.einsum('b i j, b j d -> b i d', attn, x)
+
+            sim = torch.einsum('b i d, b j d -> b i j', q, x)/np.sqrt(d)
+            attn = sim.softmax(dim = -2, dtype=torch.float32) + 1e-6
             attn_constant = attn.detach()
+            q_new = torch.einsum('b i j, b j d -> b i d', attn_constant, x)
+
+        
+        # attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
+        # attn_constant = attn.detach()
         # attn.requires_grad = False
-        q_new = attn_constant@x/torch.sum(attn, dim=-1, keepdim=True)
+      
+        # q_new = attn@x
 
         x = q_new + self.drop_path1(self.ls1(self.attn(q_new)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
-        x = attn_constant .transpose(-1,-2) @ x  # NOTE shape recover
-        x = x + x0
         
-   #not sure if we could add this
-        return x, q, q_new
+        attn = attn_constant.softmax(dim = -1, dtype=torch.float32) + 1e-6
+        ret = torch.einsum("bmn, bmc -> bnc", attn, x)
+
+        # sim = torch.einsum('b i d, b j d -> b i j', x0, x)
+        # attn = sim.softmax(dim=-2, dtype=torch.float32) + 1e-6
+        # attn = attn / torch.sum(attn, dim=-1, keepdim=True)
+        # x = attn.transpose(-1,-2) @ x  # NOTE shape recover
+        # ret = torch.einsum("bmn, bnc -> bmc", attn, x)
+        
+        x = ret + x0
+        #not sure if we could add this
+        return x, q0, q_new
 
 
 class ResPostBlock(nn.Module):
@@ -474,7 +683,6 @@ class VisionTransformer(nn.Module):
             bias=not pre_norm,  # disable bias if pre-norm is used (e.g. CLIP)
         )
         num_patches = self.patch_embed.num_patches
-
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if class_token else None
         embed_len = num_patches if no_embed_class else num_patches + self.num_prefix_tokens
         self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * .02)
@@ -597,6 +805,12 @@ class VisionTransformer(nn.Module):
                 x, q, q_new = getattr(self.blocks, f"{i}")(x, self.cluster_q[i, :, :])
                 res_q.append(q)
                 res_q_new.append(q_new)
+            # x, q, q_new = self.down(x, q)
+            # for i in range(6):
+            #     x, q, q_new = getattr(self.blocks, f"{i}")(x, self.cluster_q[i, :, :])
+            #     res_q.append(q)
+            #     res_q_new.append(q_new)
+            # x, q, q_new = self.up(x, q)
            # x, q = self.blocks(x, self.cluster_q)
         x = self.norm(x)
         return x, res_q, res_q_new
