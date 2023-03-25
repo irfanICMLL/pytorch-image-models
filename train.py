@@ -273,6 +273,8 @@ group.add_argument('--mixup-off-epoch', default=0, type=int, metavar='N',
                    help='Turn off mixup after this epoch, disabled if 0 (default: 0)')
 group.add_argument('--smoothing', type=float, default=0.1,
                    help='Label smoothing (default: 0.1)')
+group.add_argument('--cluster', type=float, default=0.1,
+                   help='Clustering loss weight (default: 0.1)')
 group.add_argument('--train-interpolation', type=str, default='random',
                    help='Training interpolation (random, bilinear, bicubic default: "random")')
 group.add_argument('--drop', type=float, default=0.0, metavar='PCT',
@@ -681,7 +683,7 @@ def main():
         if args.bce_loss:
             train_loss_fn = BinaryCrossEntropy(smoothing=args.smoothing, target_threshold=args.bce_target_thresh)
         else:
-            train_loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
+            train_loss_fn = LabelSmoothingCrossEntropy(smoothing=args.smoothing, cluster = args.cluster)
     else:
         train_loss_fn = nn.CrossEntropyLoss()
     train_loss_fn = train_loss_fn.to(device=device)

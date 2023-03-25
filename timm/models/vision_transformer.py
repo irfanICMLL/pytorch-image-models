@@ -112,6 +112,138 @@ class LayerScale(nn.Module):
     def forward(self, x):
         return x.mul_(self.gamma) if self.inplace else x * self.gamma
 
+
+def cluster_dpc_knn(input_token, cluster_num, k=5, token_mask=None):
+    """Cluster tokens with DPC-KNN algorithm.
+    Return:
+        idx_cluster (Tensor[B, N]): cluster index of each token.
+        cluster_num (int): actual cluster number. The same with
+            input cluster number
+    Args:
+        token_dict (dict): dict for token information
+        cluster_num (int): cluster number
+        k (int): number of the nearest neighbor used for local density.
+        token_mask (Tensor[B, N]): mask indicate the whether the token is
+            padded empty token. Non-zero value means the token is meaningful,
+            zero value means the token is an empty token. If set to None, all
+            tokens are regarded as meaningful.
+    """
+    with torch.no_grad():
+        x = input_token
+        B, N, C = x.shape
+
+        dist_matrix = torch.cdist(x, x) / (C ** 0.5)
+
+        if token_mask is not None:
+            token_mask = token_mask > 0
+            # in order to not affect the local density, the distance between empty tokens
+            # and any other tokens should be the maximal distance.
+            dist_matrix = dist_matrix * token_mask[:, None, :] + \
+                          (dist_matrix.max() + 1) * (~token_mask[:, None, :])
+
+        # get local density
+        dist_nearest, index_nearest = torch.topk(dist_matrix, k=k, dim=-1, largest=False)
+
+        density = (-(dist_nearest ** 2).mean(dim=-1)).exp()
+        # add a little noise to ensure no tokens have the same density.
+        density = density + torch.rand(
+            density.shape, device=density.device, dtype=density.dtype) * 1e-6
+
+        if token_mask is not None:
+            # the density of empty token should be 0
+            density = density * token_mask
+
+        # get distance indicator
+        mask = density[:, None, :] > density[:, :, None]
+        mask = mask.type(x.dtype)
+        dist_max = dist_matrix.flatten(1).max(dim=-1)[0][:, None, None]
+        dist, index_parent = (dist_matrix * mask + dist_max * (1 - mask)).min(dim=-1)
+
+        # select clustering center according to score
+        score = dist * density
+        _, index_down = torch.topk(score, k=cluster_num, dim=-1)
+
+        # assign tokens to the nearest center
+        dist_matrix = index_points(dist_matrix, index_down)
+
+        idx_cluster = dist_matrix.argmin(dim=1)
+
+        # make sure cluster center merge to itself
+        idx_batch = torch.arange(B, device=x.device)[:, None].expand(B, cluster_num)
+        idx_tmp = torch.arange(cluster_num, device=x.device)[None, :].expand(B, cluster_num)
+        idx_cluster[idx_batch.reshape(-1), index_down.reshape(-1)] = idx_tmp.reshape(-1)
+
+    return idx_cluster, cluster_num
+
+def index_points(points, idx):
+    """Sample features following the index.
+    Returns:
+        new_points:, indexed points data, [B, S, C]
+    Args:
+        points: input points data, [B, N, C]
+        idx: sample index data, [B, S]
+    """
+    device = points.device
+    B = points.shape[0]
+    view_shape = list(idx.shape)
+    view_shape[1:] = [1] * (len(view_shape) - 1)
+    repeat_shape = list(idx.shape)
+    repeat_shape[0] = 1
+    batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
+    new_points = points[batch_indices, idx, :]
+    return new_points
+
+def merge_tokens(token_dict, idx_cluster, cluster_num, token_weight=None):
+    """Merge tokens in the same cluster to a single cluster.
+    Implemented by torch.index_add(). Flops: B*N*(C+2)
+    Return:
+        out_dict (dict): dict for output token information
+    Args:
+        token_dict (dict): dict for input token information
+        idx_cluster (Tensor[B, N]): cluster index of each token.
+        cluster_num (int): cluster number
+        token_weight (Tensor[B, N, 1]): weight for each token.
+    """
+
+    x = token_dict['x']
+    idx_token = token_dict['idx_token']
+    agg_weight = token_dict['agg_weight']
+
+    B, N, C = x.shape
+    if token_weight is None:
+        token_weight = x.new_ones(B, N, 1)
+
+    idx_batch = torch.arange(B, device=x.device)[:, None]
+    idx = idx_cluster + idx_batch * cluster_num
+
+    all_weight = token_weight.new_zeros(B * cluster_num, 1)
+    all_weight.index_add_(dim=0, index=idx.reshape(B * N),
+                          source=token_weight.reshape(B * N, 1))
+    all_weight = all_weight + 1e-6
+    norm_weight = token_weight / all_weight[idx]
+
+    # average token features
+    x_merged = x.new_zeros(B * cluster_num, C)
+    source = x * norm_weight
+    x_merged.index_add_(dim=0, index=idx.reshape(B * N),
+                        source=source.reshape(B * N, C).type(x.dtype))
+    x_merged = x_merged.reshape(B, cluster_num, C)
+
+    idx_token_new = index_points(idx_cluster[..., None], idx_token).squeeze(-1)
+    weight_t = index_points(norm_weight, idx_token)
+    agg_weight_new = agg_weight * weight_t
+    agg_weight_new / agg_weight_new.max(dim=1, keepdim=True)[0]
+
+    out_dict = {}
+    out_dict['x'] = x_merged
+    out_dict['token_num'] = cluster_num
+    out_dict['map_size'] = token_dict['map_size']
+    out_dict['init_grid_size'] = token_dict['init_grid_size']
+    out_dict['idx_token'] = idx_token_new
+    out_dict['agg_weight'] = agg_weight_new
+    return out_dict
+
+
 class TokenClusteringBlock(nn.Module):
     def __init__(self, num_spixels=None, n_iters=5, temperture=1., window_size=7):
         super().__init__()
@@ -285,12 +417,12 @@ class TSAUnpooling(UnpoolingBase):
         ret = torch.einsum("bnm, bmc -> bnc", attention, x)
 
         return ret, False
-from time import time
-import numpy as np
-import matplotlib.pyplot as plt
+# from time import time
+# import numpy as np
+# import matplotlib.pyplot as plt
 
-from sklearn import datasets
-from sklearn.manifold import TSNE
+# from sklearn import datasets
+# from sklearn.manifold import TSNE
 
 # def main():
     # tsne = TSNE(n_components=2, init='pca', random_state=0)
@@ -300,7 +432,7 @@ from sklearn.manifold import TSNE
     # print('result.shape',result.shape)
     # fig = plt.figure()
     # plt.scatter(result[:,0],result[:,1])
-    # plt.savefig('./3.jpg')
+    # plt.savefig('./x_after_training.jpg')
     # plt.show(fig)
 
 
@@ -344,8 +476,9 @@ class Block(nn.Module):
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         #self.cluster_center = nn.Parameters(x.shape[0])
     def forward(self, x, q):
+        x0 = x
         x = self.norm1(x)
-        x0 = x.clone()
+        # B, N, C = x.shape
         bs = x.size()[0]
         q = q.repeat(bs, 1, 1)
         q0 = q.clone()
@@ -353,14 +486,15 @@ class Block(nn.Module):
         with torch.no_grad():
             for i in range(2):
                 sim = torch.einsum('b i d, b j d -> b i j', q, x)/np.sqrt(d)
-                attn = sim.softmax(dim=-2, dtype=torch.float32) + 1e-6
-                # attn = attn / torch.sum(attn.detach(), dim=-1, keepdim=True)
+                attn1 = sim.softmax(dim=-2, dtype=torch.float32)
+                attn = attn1 / torch.sum(attn1.detach(), dim=-1, keepdim=True)
                 q = torch.einsum('b i j, b j d -> b i d', attn, x)
 
             sim = torch.einsum('b i d, b j d -> b i j', q, x)/np.sqrt(d)
-            attn = sim.softmax(dim = -2, dtype=torch.float32) + 1e-6
-            attn_constant = attn.detach()
-            q_new = torch.einsum('b i j, b j d -> b i d', attn_constant, x)
+            attn1 = sim.softmax(dim = -2, dtype=torch.float32)
+            attn = attn1/ torch.sum(attn1.detach(), dim=-1, keepdim=True)
+            attn_constant = attn # .detach()
+        q_new = torch.einsum('b i j, b j d -> b i d', attn_constant, x)
 
         
         # attn = attn.softmax(dim = -2, dtype=torch.float32) + 1e-6
@@ -372,7 +506,7 @@ class Block(nn.Module):
         x = q_new + self.drop_path1(self.ls1(self.attn(q_new)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         
-        attn = attn_constant.softmax(dim = -1, dtype=torch.float32) + 1e-6
+        attn = sim.softmax(dim = -2, dtype=torch.float32)
         ret = torch.einsum("bmn, bmc -> bnc", attn, x)
 
         # sim = torch.einsum('b i d, b j d -> b i j', x0, x)
